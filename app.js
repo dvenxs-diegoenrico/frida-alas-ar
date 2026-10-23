@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
+import { makeStabilizer, MINDAR_PASSTHROUGH, preferHDCamera, makeDebug } from './estabilizador.js';
 
 /* ============================================================
    ALAS PA' VOLAR · Frida Kahlo por Federico Chilian Espinosa
@@ -357,33 +358,40 @@ async function start() {
     const img = await loadArt();
     const src = await getTargetSrc(img, (p) => { bar.style.width = Math.round(p) + '%'; });
     bar.style.width = '100%'; $('loadMsg').textContent = 'Abriendo cámara';
-    const mindar = new MindARThree({ container: $('ar'), imageTargetSrc: src, uiLoading: 'no', uiScanning: 'no', uiError: 'no', filterMinCF: 0.0001, filterBeta: 0.001 });
+    const mindar = new MindARThree({ container: $('ar'), imageTargetSrc: src, uiLoading: 'no', uiScanning: 'no', uiError: 'no', ...MINDAR_PASSTHROUGH });
     const { renderer, scene, camera } = mindar;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio || 1));
     const canvas = makeCanvas(), ctx = canvas.getContext('2d');
     render(0, ctx);
     const tex = new THREE.CanvasTexture(canvas); tex.colorSpace = THREE.SRGBColorSpace;
     const plane = new THREE.Mesh(new THREE.PlaneGeometry(CW / W, CH / W), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
-    const anchor = mindar.addAnchor(0); anchor.group.add(plane);
+    const anchor = mindar.addAnchor(0);
+    const stab = makeStabilizer(anchor); scene.add(stab.group); stab.group.add(plane);   // pose rígida y estable
+    const debug = makeDebug(stab);
 
-    let visible = false, t0 = 0, fired = new Set(), lastT = 0;
+    let visible = false, t0 = 0, fired = new Set(), lastT = 0, lastDraw = 0, lostAt = 0, everFound = false;
     const restart = () => { t0 = performance.now(); fired = new Set(); };
-    anchor.onTargetFound = () => { visible = true; restart(); show('scan', false); };
-    anchor.onTargetLost = () => { visible = false; show('scan'); $('quote').classList.remove('on'); };
+    // si se pierde el estampado un instante, la animación sigue donde iba
+    anchor.onTargetFound = () => { visible = true; if (!everFound || performance.now() - lostAt > 2500) restart(); everFound = true; show('scan', false); };
+    anchor.onTargetLost = () => { visible = false; lostAt = performance.now(); show('scan'); $('quote').classList.remove('on'); };
 
+    preferHDCamera();
     await mindar.start();
     show('loading', false); show('scan'); show('hud');
     $('replay').onclick = () => { if (actx) actx.resume(); restart(); };
     $('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? 'Sin sonido' : 'Sonido'; $('mute').setAttribute('aria-pressed', String(muted)); };
 
     renderer.setAnimationLoop(() => {
+      stab.update();
       if (visible) {
-        const t = ((performance.now() - t0) / 1000) % LOOP;
+        const now = performance.now(), t = ((now - t0) / 1000) % LOOP;
         if (t < lastT) fired = new Set();
         lastT = t; runCues(t, fired); caption(t);
-        render(t, ctx); tex.needsUpdate = true;
+        // redibujar la animación a 30 fps: subir la textura cada cuadro le robaba tiempo al rastreo
+        if (now - lastDraw > 32) { lastDraw = now; render(t, ctx); tex.needsUpdate = true; }
       }
-      renderer.render(scene, camera);
+      renderer.render(scene, camera); debug();
     });
   } catch (e) {
     console.error(e);
