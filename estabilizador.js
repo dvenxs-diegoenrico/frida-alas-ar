@@ -21,9 +21,9 @@ const num = (k, d) => { const v = parseFloat(QS.get(k)); return Number.isFinite(
 
 // Parámetros (afinables desde la URL: ?rmin=…&rbeta=…&pmin=…&pbeta=…&zmin=…)
 export const STAB = {
-  rotMin: num('rmin', 0.3), rotBeta: num('rbeta', 6.0), rotFloor: num('rfloor', 0.15),   // Hz · Hz por rad/s · rad/s
-  posMin: num('pmin', 0.7), posBeta: num('pbeta', 4.0), posFloor: num('pfloor', 0.12),    // por (ancho de ilustración)/s
-  depMin: num('zmin', 0.35), depBeta: num('zbeta', 3.0), depFloor: num('zfloor', 0.25),     // profundidad relativa/s
+  rotMin: num('rmin', 0.25), rotBeta: num('rbeta', 9.0), rotFloor: num('rfloor', 0.15),   // Hz · Hz por rad/s · rad/s
+  posMin: num('pmin', 1.0), posBeta: num('pbeta', 4.0), posFloor: num('pfloor', 0.12),    // por (ancho de ilustración)/s
+  depMin: num('zmin', 0.35), depBeta: num('zbeta', 6.0), depFloor: num('zfloor', 0.25),     // profundidad relativa/s
   pre: 4.0,          // presuavizado para estimar velocidad (Hz)
   vCut: 1.5,         // suavizado de la velocidad (Hz)
   snapAngle: 0.6,    // salto mayor (rad) = nueva detección: se reacomoda de golpe
@@ -45,7 +45,7 @@ export function makeStabilizer(anchor, P = STAB) {
   const fp = new THREE.Vector3(), fq = new THREE.Quaternion(); let fs = 1;
   const vel = new THREE.Vector3(), omega = new THREE.Vector3(); let sVel = 0;
   let vRot = 0, vPos = 0, vDep = 0, last = 0, lastRawT = 0, init = false;
-  const lastEl = new Float32Array(16);
+  const lastEl = new Float64Array(16);   // misma precisión que la matriz (Float32 nunca coincidía)
   const t1 = new THREE.Vector3(), t2 = new THREE.Vector3(), t3 = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1);
   const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
   const toVec = (q, out) => { // cuaternión -> vector de rotación (eje * ángulo)
@@ -63,13 +63,8 @@ export function makeStabilizer(anchor, P = STAB) {
     // ¿llegó una pose nueva del rastreo? (el rastreo va a 15–30 fps; la pantalla a 60)
     const el = gA.matrix.elements; let fresh = !init;
     for (let i = 0; i < 16 && !fresh; i++) if (el[i] !== lastEl[i]) fresh = true;
-    const dtFrame = Math.min(0.1, Math.max(1 / 240, (now - last) / 1000)); last = now;
-    if (init && !fresh) {                       // entre poses: solo predecir con la velocidad
-      const k = Math.min(1, (now - lastRawT) / 1000 < 0.15 ? 1 : 0);
-      if (k) { fq.copy(qb.copy(fromVec(t3.copy(omega).multiplyScalar(dtFrame), qa)).multiply(fq)).normalize(); fp.addScaledVector(vel, dtFrame); fs += sVel * dtFrame; }
-      group.matrix.compose(fp, fq, t1.copy(one).multiplyScalar(fs)); group.updateMatrixWorld(true);
-      return true;
-    }
+    last = now;
+    if (init && !fresh) { show(now); return true; }   // entre poses: se dibuja el estado proyectado al instante actual
     lastEl.set(el);
     gA.matrix.decompose(rp, rq, rs); rq.normalize();
     const s = (Math.abs(rs.x) + Math.abs(rs.y) + Math.abs(rs.z)) / 3 || 1;
@@ -111,9 +106,18 @@ export function makeStabilizer(anchor, P = STAB) {
       const sPred = fs + sVel * dt, sr = s - sPred;
       fs = sPred + gD * sr; sVel = (sVel + hFor(gD) * sr / dt) * (vDep > 0 ? 1 : .9);
     }
-    group.matrix.compose(fp, fq, t1.copy(one).multiplyScalar(fs));   // rígida + escala uniforme
-    group.updateMatrixWorld(true);
+    show(now);
     return true;
+  }
+  // Dibuja el estado corregido (en el instante de la última pose) proyectado hasta ahora con la velocidad.
+  // El estado corregido no se modifica aquí, así la predicción no se cuenta dos veces.
+  const dq = new THREE.Quaternion(), dp = new THREE.Vector3(), dv = new THREE.Vector3();
+  function show(now) {
+    const e = Math.min(0.12, Math.max(0, (now - lastRawT) / 1000));
+    fromVec(dv.copy(omega).multiplyScalar(e), dq).multiply(fq).normalize();
+    dp.copy(fp).addScaledVector(vel, e);
+    group.matrix.compose(dp, dq, t1.copy(one).multiplyScalar(fs + sVel * e));   // rígida + escala uniforme
+    group.updateMatrixWorld(true);
   }
   return { group, update, reset: () => { init = false; }, state: () => ({ vRot, vPos, vDep, fs }) };
 }
